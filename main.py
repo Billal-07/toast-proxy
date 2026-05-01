@@ -12,6 +12,7 @@ CLIENT_ID =  os.getenv("CLIENT_ID")
 CLIENT_SECRET = os.getenv("CLIENT_SECRET")
 USER_ACCESS_TYPE = "TOAST_MACHINE_CLIENT"
 RESTAURANT_GUID  = os.getenv("RESTAURANT_GUID")
+TOAST_MANAGEMENT_GROUP_EXTERNAL_ID = os.getenv("TOAST_MANAGEMENT_GROUP_EXTERNAL_ID")
 # ───────────────────────────────────────────────────────────
 
 
@@ -47,7 +48,8 @@ async def debug():
         "CLIENT_SECRET": f"{CLIENT_SECRET[:4]}****",  # hides most of secret
         "USER_ACCESS_TYPE": USER_ACCESS_TYPE,
         "TOAST_BASE_URL": TOAST_BASE_URL,
-        "RESTAURANT_GUID": RESTAURANT_GUID
+        "RESTAURANT_GUID": RESTAURANT_GUID,
+        "TOAST_MANAGEMENT_GROUP_EXTERNAL_ID": TOAST_MANAGEMENT_GROUP_EXTERNAL_ID
     }
 
 @app.get("/login", tags=["Auth"])
@@ -65,6 +67,57 @@ async def login():
     if response.status_code != 200:
         raise HTTPException(status_code=response.status_code, detail=response.text)
     return {"success": True, "status_code": response.status_code, "response": response.json()}
+
+
+@app.get("/restaurants-information", tags=["Restaurants"])
+async def get_restaurants_information():
+    """
+    Logs in first, then uses the access token to fetch
+    restaurant information from /era/v1/restaurants-information
+    """
+    # Step 1 — Login and get token
+    async with httpx.AsyncClient() as client:
+        auth_response = await client.post(
+            f"{TOAST_BASE_URL}/authentication/v1/authentication/login",
+            json={
+                "clientId": CLIENT_ID,
+                "clientSecret": CLIENT_SECRET,
+                "userAccessType": USER_ACCESS_TYPE
+            },
+            headers={"Content-Type": "application/json"}
+        )
+
+    if auth_response.status_code != 200:
+        raise HTTPException(
+            status_code=auth_response.status_code,
+            detail=f"Login failed: {auth_response.text}"
+        )
+
+    auth_data = auth_response.json()
+    access_token = auth_data["token"]["accessToken"]
+
+    # Step 2 — Use token to fetch restaurant information
+    async with httpx.AsyncClient() as client:
+        info_response = await client.get(
+            f"{TOAST_BASE_URL}/era/v1/restaurants-information",
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Toast-Management-Group-External-ID": TOAST_MANAGEMENT_GROUP_EXTERNAL_ID
+            }
+        )
+
+    if info_response.status_code != 200:
+        raise HTTPException(
+            status_code=info_response.status_code,
+            detail=f"Failed to fetch restaurant info: {info_response.text}"
+        )
+
+    return {
+        "success": True,
+        "status_code": info_response.status_code,
+        "access_token_used": f"{access_token[:20]}****",  # partially hidden for safety
+        "response": info_response.json()
+    }
 
 
 @app.get("/restaurants", tags=["Restaurants"])
