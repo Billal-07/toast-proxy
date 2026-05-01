@@ -39,6 +39,17 @@ async def health():
     return {"status": "ok", "message": "Toast Proxy is running"}
 
 
+@app.get("/debug", tags=["Debug"])
+async def debug():
+    """Shows exactly what credentials are being used."""
+    return {
+        "CLIENT_ID": CLIENT_ID,
+        "CLIENT_SECRET": f"{CLIENT_SECRET[:4]}****",  # hides most of secret
+        "USER_ACCESS_TYPE": USER_ACCESS_TYPE,
+        "TOAST_BASE_URL": TOAST_BASE_URL,
+        "RESTAURANT_GUID": RESTAURANT_GUID
+    }
+
 @app.get("/login", tags=["Auth"])
 async def login():
     async with httpx.AsyncClient() as client:
