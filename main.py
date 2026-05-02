@@ -78,8 +78,9 @@ async def get_metrics(
     Workflow:
     1. Login → get access token
     2. Fetch all restaurant IDs from /era/v1/restaurants-information
-    3. Pass all restaurant IDs to /era/v1/metrics
-    4. Return metrics data
+    3. POST to /era/v1/metrics → get job ID
+    4. GET /era/v1/metrics/{job_id} → fetch actual metrics result
+    5. Return final metrics data
     """
     try:
         # ── STEP 1: LOGIN ──────────────────────────────────────────
@@ -113,7 +114,7 @@ async def get_metrics(
 
         common_headers = {
             "Authorization": f"Bearer {access_token}",
-            "Toast-Management-Group-External-ID": TOAST_MANAGEMENT_GROUP_EXTERNAL_ID,
+            "Toast-Management-Group-External-ID": RESTAURANT_GUID,
             "Content-Type": "application/json"
         }
 
@@ -156,7 +157,7 @@ async def get_metrics(
                 "raw_restaurants": restaurants_data
             }
 
-        # ── STEP 3: FETCH METRICS ──────────────────────────────────
+        # ── STEP 3: POST METRICS → GET JOB ID ─────────────────────
         async with httpx.AsyncClient() as client:
             metrics_response = await client.post(
                 f"{TOAST_BASE_URL}/era/v1/metrics",
@@ -171,26 +172,91 @@ async def get_metrics(
 
         if metrics_response.status_code != 200:
             return {
-                "step": "metrics",
-                "error": "Failed to fetch metrics",
+                "step": "metrics_post",
+                "error": "Failed to post metrics request",
                 "status_code": metrics_response.status_code,
-                "detail": metrics_response.text,
-                "request_body_sent": {
-                    "startBusinessDate": startBusinessDate,
-                    "endBusinessDate": endBusinessDate,
-                    "restaurantIds": restaurant_ids,
-                    "excludedRestaurantIds": []
-                }
+                "detail": metrics_response.text
             }
 
         try:
-            metrics_data = metrics_response.json()
+            job_id = metrics_response.json()
         except Exception as e:
             return {
-                "step": "metrics",
-                "error": "Failed to parse metrics response",
+                "step": "metrics_post",
+                "error": "Failed to parse metrics job ID",
                 "detail": str(e),
                 "raw": metrics_response.text
+            }
+
+        if not job_id:
+            return {
+                "step": "metrics_post",
+                "error": "No job ID returned from metrics endpoint",
+                "raw": metrics_response.text
+            }
+
+        # ── STEP 4: POLL METRICS RESULT WITH JOB ID ───────────────
+        import asyncio
+
+        max_retries = 10       # try up to 10 times
+        retry_delay = 3        # wait 3 seconds between each retry
+        metrics_result = None
+
+        for attempt in range(1, max_retries + 1):
+            await asyncio.sleep(retry_delay)
+
+            async with httpx.AsyncClient() as client:
+                result_response = await client.get(
+                    f"{TOAST_BASE_URL}/era/v1/metrics/{job_id}/",
+                    headers=common_headers
+                )
+
+            # Log each attempt for debugging
+            print(f"Attempt {attempt}: status={result_response.status_code}, body={result_response.text[:200]}")
+
+            if result_response.status_code == 200:
+                try:
+                    metrics_result = result_response.json()
+                except Exception as e:
+                    return {
+                        "step": "metrics_result_parse",
+                        "error": "Failed to parse metrics result",
+                        "detail": str(e),
+                        "raw": result_response.text
+                    }
+
+                # Check if result is still processing
+                # Toast may return a status field like "PENDING" or "PROCESSING"
+                if isinstance(metrics_result, dict):
+                    status = metrics_result.get("status", "").upper()
+                    if status in ["PENDING", "PROCESSING", "IN_PROGRESS"]:
+                        print(f"Attempt {attempt}: Still processing — status={status}")
+                        continue  # keep polling
+
+                # Got a real result — break out
+                break
+
+            elif result_response.status_code == 202:
+                # 202 Accepted means still processing
+                print(f"Attempt {attempt}: 202 Accepted — still processing")
+                continue
+
+            else:
+                return {
+                    "step": "metrics_result_fetch",
+                    "error": "Failed to fetch metrics result",
+                    "attempt": attempt,
+                    "job_id": job_id,
+                    "status_code": result_response.status_code,
+                    "detail": result_response.text
+                }
+
+        if metrics_result is None:
+            return {
+                "step": "metrics_result_fetch",
+                "error": f"Metrics result not ready after {max_retries} attempts ({max_retries * retry_delay}s)",
+                "job_id": job_id,
+                "suggestion": "Try calling /metrics/result/{job_id} manually after a few seconds"
             }
 
         # ── RETURN FINAL RESPONSE ──────────────────────────────────
@@ -200,28 +266,49 @@ async def get_metrics(
             "endBusinessDate": endBusinessDate,
             "total_restaurants": len(restaurant_ids),
             "restaurant_ids": restaurant_ids,
-            "metrics": metrics_data
+            "job_id": job_id,
+            "metrics": metrics_result
         }
 
     except httpx.ConnectError as e:
-        return {
-            "step": "network",
-            "error": "Connection error — could not reach Toast API",
-            "detail": str(e)
-        }
+        return {"step": "network", "error": "Connection error", "detail": str(e)}
     except httpx.TimeoutException as e:
-        return {
-            "step": "network",
-            "error": "Request timed out",
-            "detail": str(e)
-        }
+        return {"step": "network", "error": "Request timed out", "detail": str(e)}
     except Exception as e:
+        return {"step": "unknown", "error": "Unexpected error", "error_type": type(e).__name__, "detail": str(e)}
+
+
+# ── BONUS: Fetch metrics result manually by job ID ─────────────
+@app.get("/metrics/result/{job_id}", tags=["Metrics"])
+async def get_metrics_result(job_id: str):
+    """
+    Manually fetch metrics result using a job ID.
+    Use this if /metrics times out before the result is ready.
+    """
+    try:
+        access_token = await get_auth_token()
+
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{TOAST_BASE_URL}/era/v1/metrics/{job_id}/",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Toast-Management-Group-External-ID": RESTAURANT_GUID,
+                    "Content-Type": "application/json"
+                }
+            )
+
         return {
-            "step": "unknown",
-            "error": "Unexpected error occurred",
-            "error_type": type(e).__name__,
-            "detail": str(e)
+            "success": response.status_code == 200,
+            "job_id": job_id,
+            "status_code": response.status_code,
+            "response": response.json() if response.status_code == 200 else None,
+            "raw": response.text if response.status_code != 200 else None
         }
+
+    except Exception as e:
+        return {"step": "unknown", "error": str(e), "error_type": type(e).__name__}
+
 
 
 @app.get("/restaurants-information", tags=["Restaurants"])
