@@ -113,7 +113,7 @@ async def get_metrics(
 
         common_headers = {
             "Authorization": f"Bearer {access_token}",
-            "Toast-Management-Group-External-ID": RESTAURANT_GUID,
+            "Toast-Management-Group-External-ID": TOAST_MANAGEMENT_GROUP_EXTERNAL_ID,
             "Content-Type": "application/json"
         }
 
