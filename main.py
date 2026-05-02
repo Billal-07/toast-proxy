@@ -293,7 +293,7 @@ async def get_metrics_result(job_id: str):
                 f"{TOAST_BASE_URL}/era/v1/metrics/{job_id}/",
                 headers={
                     "Authorization": f"Bearer {access_token}",
-                    "Toast-Management-Group-External-ID": RESTAURANT_GUID,
+                    "Toast-Management-Group-External-ID": TOAST_MANAGEMENT_GROUP_EXTERNAL_ID,
                     "Content-Type": "application/json"
                 }
             )
