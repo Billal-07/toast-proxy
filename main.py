@@ -69,6 +69,161 @@ async def login():
     return {"success": True, "status_code": response.status_code, "response": response.json()}
 
 
+@app.get("/metrics", tags=["Metrics"])
+async def get_metrics(
+    startBusinessDate: str = "20260401",
+    endBusinessDate: str = "20260407"
+):
+    """
+    Workflow:
+    1. Login → get access token
+    2. Fetch all restaurant IDs from /era/v1/restaurants-information
+    3. Pass all restaurant IDs to /era/v1/metrics
+    4. Return metrics data
+    """
+    try:
+        # ── STEP 1: LOGIN ──────────────────────────────────────────
+        async with httpx.AsyncClient() as client:
+            auth_response = await client.post(
+                f"{TOAST_BASE_URL}/authentication/v1/authentication/login",
+                json={
+                    "clientId": CLIENT_ID,
+                    "clientSecret": CLIENT_SECRET,
+                    "userAccessType": USER_ACCESS_TYPE
+                },
+                headers={"Content-Type": "application/json"}
+            )
+
+        if auth_response.status_code != 200:
+            return {
+                "step": "login",
+                "error": "Login failed",
+                "status_code": auth_response.status_code,
+                "detail": auth_response.text
+            }
+
+        try:
+            access_token = auth_response.json()["token"]["accessToken"]
+        except KeyError as e:
+            return {
+                "step": "token_extraction",
+                "error": f"Could not extract token — missing key: {str(e)}",
+                "auth_response": auth_response.json()
+            }
+
+        common_headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Toast-Management-Group-External-ID": RESTAURANT_GUID,
+            "Content-Type": "application/json"
+        }
+
+        # ── STEP 2: FETCH ALL RESTAURANT IDs ──────────────────────
+        async with httpx.AsyncClient() as client:
+            restaurants_response = await client.get(
+                f"{TOAST_BASE_URL}/era/v1/restaurants-information",
+                headers=common_headers
+            )
+
+        if restaurants_response.status_code != 200:
+            return {
+                "step": "restaurants_information",
+                "error": "Failed to fetch restaurants",
+                "status_code": restaurants_response.status_code,
+                "detail": restaurants_response.text
+            }
+
+        try:
+            restaurants_data = restaurants_response.json()
+        except Exception as e:
+            return {
+                "step": "restaurants_information",
+                "error": "Failed to parse restaurants response",
+                "detail": str(e),
+                "raw": restaurants_response.text
+            }
+
+        # Extract only active, non-archived restaurant IDs
+        restaurant_ids = [
+            r["restaurantGuid"]
+            for r in restaurants_data
+            if r.get("active") and not r.get("archived")
+        ]
+
+        if not restaurant_ids:
+            return {
+                "step": "restaurant_ids_extraction",
+                "error": "No active restaurants found",
+                "raw_restaurants": restaurants_data
+            }
+
+        # ── STEP 3: FETCH METRICS ──────────────────────────────────
+        async with httpx.AsyncClient() as client:
+            metrics_response = await client.post(
+                f"{TOAST_BASE_URL}/era/v1/metrics",
+                headers=common_headers,
+                json={
+                    "startBusinessDate": startBusinessDate,
+                    "endBusinessDate": endBusinessDate,
+                    "restaurantIds": restaurant_ids,
+                    "excludedRestaurantIds": []
+                }
+            )
+
+        if metrics_response.status_code != 200:
+            return {
+                "step": "metrics",
+                "error": "Failed to fetch metrics",
+                "status_code": metrics_response.status_code,
+                "detail": metrics_response.text,
+                "request_body_sent": {
+                    "startBusinessDate": startBusinessDate,
+                    "endBusinessDate": endBusinessDate,
+                    "restaurantIds": restaurant_ids,
+                    "excludedRestaurantIds": []
+                }
+            }
+
+        try:
+            metrics_data = metrics_response.json()
+        except Exception as e:
+            return {
+                "step": "metrics",
+                "error": "Failed to parse metrics response",
+                "detail": str(e),
+                "raw": metrics_response.text
+            }
+
+        # ── RETURN FINAL RESPONSE ──────────────────────────────────
+        return {
+            "success": True,
+            "startBusinessDate": startBusinessDate,
+            "endBusinessDate": endBusinessDate,
+            "total_restaurants": len(restaurant_ids),
+            "restaurant_ids": restaurant_ids,
+            "metrics": metrics_data
+        }
+
+    except httpx.ConnectError as e:
+        return {
+            "step": "network",
+            "error": "Connection error — could not reach Toast API",
+            "detail": str(e)
+        }
+    except httpx.TimeoutException as e:
+        return {
+            "step": "network",
+            "error": "Request timed out",
+            "detail": str(e)
+        }
+    except Exception as e:
+        return {
+            "step": "unknown",
+            "error": "Unexpected error occurred",
+            "error_type": type(e).__name__,
+            "detail": str(e)
+        }
+
+
 @app.get("/restaurants-information", tags=["Restaurants"])
 async def get_restaurants_information():
     """
